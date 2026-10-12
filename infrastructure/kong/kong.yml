@@ -1,2 +1,12 @@
 _format_version: "3.0"
-services: []
+_transform: true
+
+services:
+  - name: catalog-service
+    url: http://catalog-service:8081
+
+    routes:
+      - name: catalog-api
+        paths:
+          - /api/v1/catalog
+        strip_path: false
