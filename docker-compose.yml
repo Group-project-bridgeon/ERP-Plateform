@@ -72,8 +72,78 @@ services:
       start_period: 10s
 
 
+  auth-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    volumes:
+      - ../Authentication/db/migrations:/migrations:ro
+
+    command:
+      - -path=/migrations
+      - -database=postgres://auth_service:${AUTH_DB_PASSWORD}@postgres:5432/auth_db?sslmode=disable
+      - up
+
+
+  auth-service:
+    build:
+      context: ../Authentication
+
+    image: erp/authentication:dev
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+      auth-migrate:
+        condition: service_completed_successfully
+
+    environment:
+      PORT: "8080"
+      APP_ENV: ${AUTH_APP_ENV:-development}
+
+      DATABASE_URL: postgres://auth_service:${AUTH_DB_PASSWORD}@postgres:5432/auth_db?sslmode=disable
+
+      JWT_SECRET: ${AUTH_JWT_SECRET}
+      JWT_EXPIRY: ${AUTH_JWT_EXPIRY:-15m}
+
+      GOOGLE_CLIENT_ID: ${AUTH_GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${AUTH_GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URL: ${AUTH_GOOGLE_REDIRECT_URL:-http://localhost:8000/api/v1/auth/google/callback}
+
+      SMTP_HOST: ${AUTH_SMTP_HOST:-mock}
+      SMTP_PORT: ${AUTH_SMTP_PORT:-587}
+      SMTP_USERNAME: ${AUTH_SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${AUTH_SMTP_PASSWORD:-}
+      SMTP_FROM: ${AUTH_SMTP_FROM:-noreply@example.com}
+      SMTP_FROM_NAME: ${AUTH_SMTP_FROM_NAME:-Authentication Service}
+
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:8080/ready" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    stop_grace_period: 15s
+
+    security_opt:
+      - no-new-privileges:true
+
+
   catalog-migrate:
     image: migrate/migrate:v4.18.3
+
     restart: "no"
 
     depends_on:
