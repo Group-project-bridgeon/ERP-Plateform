@@ -36,6 +36,7 @@ services:
       retries: 10
       start_period: 10s
 
+
   kong:
     image: kong:3.9.3
     container_name: erp-kong
@@ -69,6 +70,79 @@ services:
       timeout: 10s
       retries: 10
       start_period: 10s
+
+
+  catalog-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    volumes:
+      - ../Catalog-Service/db/migrations:/migrations:ro
+
+    command:
+      - -path=/migrations
+      - -database=postgres://catalog_service:${CATALOG_DB_PASSWORD}@postgres:5432/catalog_db?sslmode=disable
+      - up
+
+
+  catalog-service:
+    build:
+      context: ../Catalog-Service
+
+    image: erp/catalog-service:dev
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+      catalog-migrate:
+        condition: service_completed_successfully
+
+    environment:
+      PORT: "8081"
+      GIN_MODE: release
+
+      DATABASE_URL: postgres://catalog_service:${CATALOG_DB_PASSWORD}@postgres:5432/catalog_db?sslmode=disable
+
+      DB_MAX_CONNS: ${CATALOG_DB_MAX_CONNS:-10}
+      DB_MIN_CONNS: ${CATALOG_DB_MIN_CONNS:-2}
+      DB_MAX_CONN_LIFETIME: ${CATALOG_DB_MAX_CONN_LIFETIME:-30m}
+      DB_MAX_CONN_IDLE_TIME: ${CATALOG_DB_MAX_CONN_IDLE_TIME:-5m}
+      DB_HEALTH_CHECK_PERIOD: ${CATALOG_DB_HEALTH_CHECK_PERIOD:-1m}
+      DB_STATEMENT_TIMEOUT: ${CATALOG_DB_STATEMENT_TIMEOUT:-5s}
+
+      HTTP_MAX_BODY_BYTES: ${CATALOG_HTTP_MAX_BODY_BYTES:-1048576}
+      HTTP_SLOW_REQUEST_THRESHOLD: ${CATALOG_HTTP_SLOW_REQUEST_THRESHOLD:-500ms}
+
+      REFERENCE_CACHE_TTL: ${CATALOG_REFERENCE_CACHE_TTL:-45s}
+
+    # Temporary direct access for local verification.
+    # Kong integration will come later.
+    ports:
+      - "127.0.0.1:8081:8081"
+
+    # Dockerfile uses /health as liveness.
+    # In the complete ERP Compose environment we additionally use
+    # DB-aware readiness here.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/ready" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    stop_grace_period: 15s
+
+    security_opt:
+      - no-new-privileges:true
+
 
 volumes:
   postgres_data:
