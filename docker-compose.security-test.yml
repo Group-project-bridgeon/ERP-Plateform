@@ -1,0 +1,95 @@
+# Standalone disposable fixture. Never combine with the normal Compose file.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: security_test
+      POSTGRES_PASSWORD: ${SECURITY_TEST_DB_PASSWORD:?Run the test script}
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1::5432"
+    volumes:
+      - ./scripts/security-test-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U security_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  auth-migrate:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../Authentication/db/migrations:/migrations:ro
+    command: ["-path=/migrations", "-database=postgres://security_test:${SECURITY_TEST_DB_PASSWORD}@postgres:5432/auth_security_test?sslmode=disable", "up"]
+  catalog-migrate:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../Catalog-Service/db/migrations:/migrations:ro
+    command: ["-path=/migrations", "-database=postgres://security_test:${SECURITY_TEST_DB_PASSWORD}@postgres:5432/catalog_security_test?sslmode=disable", "up"]
+  auth-service:
+    build: ../Authentication
+    depends_on:
+      auth-migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://security_test:${SECURITY_TEST_DB_PASSWORD}@postgres:5432/auth_security_test?sslmode=disable
+      JWT_PRIVATE_KEY_PATH: /run/secrets/private.pem
+      JWT_ISSUER: erp-auth
+      JWT_AUDIENCE: erp-api
+      JWT_EXPIRY: 15m
+      SMTP_HOST: mock
+      PORT: "8080"
+    volumes:
+      - type: bind
+        source: ${SECURITY_TEST_KEY_DIR:?Run the test script}/private.pem
+        target: /run/secrets/private.pem
+        read_only: true
+        bind:
+          create_host_path: false
+  catalog-service:
+    build: ../Catalog-Service
+    depends_on:
+      catalog-migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://security_test:${SECURITY_TEST_DB_PASSWORD}@postgres:5432/catalog_security_test?sslmode=disable
+      JWT_PUBLIC_KEY_PATH: /run/secrets/public.pem
+      JWT_ISSUER: erp-auth
+      JWT_AUDIENCE: erp-api
+      PORT: "8081"
+      GIN_MODE: release
+      REFERENCE_CACHE_TTL: 1ms
+    volumes:
+      - type: bind
+        source: ${SECURITY_TEST_KEY_DIR:?Run the test script}/public.pem
+        target: /run/secrets/public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+  kong:
+    image: kong:3.9.3
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: "off"
+    ports:
+      - "127.0.0.1::8000"
+    volumes:
+      - ./infrastructure/kong/kong.yml:/kong/declarative/kong.yml:ro
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

@@ -109,7 +109,9 @@ services:
 
       DATABASE_URL: postgres://auth_service:${AUTH_DB_PASSWORD}@postgres:5432/auth_db?sslmode=disable
 
-      JWT_SECRET: ${AUTH_JWT_SECRET}
+      JWT_PRIVATE_KEY_PATH: /run/secrets/auth-jwt-private.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
       JWT_EXPIRY: ${AUTH_JWT_EXPIRY:-15m}
 
       GOOGLE_CLIENT_ID: ${AUTH_GOOGLE_CLIENT_ID:-}
@@ -122,6 +124,14 @@ services:
       SMTP_PASSWORD: ${AUTH_SMTP_PASSWORD:-}
       SMTP_FROM: ${AUTH_SMTP_FROM:-noreply@example.com}
       SMTP_FROM_NAME: ${AUTH_SMTP_FROM_NAME:-Authentication Service}
+
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-private.pem
+        target: /run/secrets/auth-jwt-private.pem
+        read_only: true
+        bind:
+          create_host_path: false
 
     ports:
       - "127.0.0.1:8080:8080"
@@ -177,6 +187,10 @@ services:
       PORT: "8081"
       GIN_MODE: release
 
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
+
       DATABASE_URL: postgres://catalog_service:${CATALOG_DB_PASSWORD}@postgres:5432/catalog_db?sslmode=disable
 
       DB_MAX_CONNS: ${CATALOG_DB_MAX_CONNS:-10}
@@ -191,10 +205,13 @@ services:
 
       REFERENCE_CACHE_TTL: ${CATALOG_REFERENCE_CACHE_TTL:-45s}
 
-    # Temporary direct access for local verification.
-    # Kong integration will come later.
-    ports:
-      - "127.0.0.1:8081:8081"
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
 
     # Dockerfile uses /health as liveness.
     # In the complete ERP Compose environment we additionally use
