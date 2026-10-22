@@ -231,5 +231,65 @@ services:
       - no-new-privileges:true
 
 
+  inventory-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # lib/pq reads the raw password separately, avoiding URI interpolation.
+      PGPASSWORD: ${INVENTORY_DB_PASSWORD:?Set INVENTORY_DB_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../Inventory-Service/db/migrations
+        target: /migrations
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - -path=/migrations
+      - -database=postgres://inventory_service@postgres:5432/inventory_db?sslmode=disable
+      - up
+
+  inventory-service:
+    build:
+      context: ../Inventory-Service
+    image: erp/inventory-service:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory-migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8082"
+      DATABASE_URL: postgres://inventory_service@postgres:5432/inventory_db?sslmode=disable
+      # pgx reads PGPASSWORD. Reserved password characters never enter the URI.
+      PGPASSWORD: ${INVENTORY_DB_PASSWORD:?Set INVENTORY_DB_PASSWORD}
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
+      SHUTDOWN_TIMEOUT: 10s
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    # Internal-only by default. Clients use Kong's port 8000.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/ready" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   postgres_data:

@@ -18,3 +18,7 @@ pwsh -NoProfile -File ./scripts/test-catalog-security.ps1
 
 It uses separate containers, tmpfs data, temporary keys and fresh test identities.
 See [the verification record](docs/catalog-security-results.md) for user-reported runtime results and separately attributed agent checks. Auth, Catalog and Platform require a coordinated configuration/key rollout; migration 000005 defines permissions but grants none.
+
+## Inventory Docker and gateway integration
+
+See [Inventory build/start flow, isolated verification and deployment proposal](docs/inventory-docker-integration.md). Run `pwsh -NoProfile -File ./scripts/test-inventory-gateway.ps1` for disposable verification. Normal infrastructure is not deployed by the test.
