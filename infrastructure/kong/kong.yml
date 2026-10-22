@@ -1,0 +1,29 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: inventory-service
+    url: http://inventory-service:8082
+    routes:
+      - name: inventory-api
+        paths:
+          - /api/v1/inventory
+        strip_path: false
+
+  - name: catalog-service
+    url: http://catalog-service:8081
+
+    routes:
+      - name: catalog-api
+        paths:
+          - /api/v1/catalog
+        strip_path: false
+
+  - name: auth-service
+    url: http://auth-service:8080
+
+    routes:
+      - name: auth-api
+        paths:
+          - /api/v1/auth
+        strip_path: false

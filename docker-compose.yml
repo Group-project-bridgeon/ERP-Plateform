@@ -36,5 +36,260 @@ services:
       retries: 10
       start_period: 10s
 
+
+  kong:
+    image: kong:3.9.3
+    container_name: erp-kong
+    restart: unless-stopped
+
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+
+    ports:
+      - "8000:8000"
+      - "127.0.0.1:8001:8001"
+
+    volumes:
+      - ./infrastructure/kong/kong.yml:/kong/declarative/kong.yml:ro
+
+    healthcheck:
+      test:
+        - CMD
+        - kong
+        - health
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+
+  auth-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    volumes:
+      - ../Authentication/db/migrations:/migrations:ro
+
+    command:
+      - -path=/migrations
+      - -database=postgres://auth_service:${AUTH_DB_PASSWORD}@postgres:5432/auth_db?sslmode=disable
+      - up
+
+
+  auth-service:
+    build:
+      context: ../Authentication
+
+    image: erp/authentication:dev
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+      auth-migrate:
+        condition: service_completed_successfully
+
+    environment:
+      PORT: "8080"
+      APP_ENV: ${AUTH_APP_ENV:-development}
+
+      DATABASE_URL: postgres://auth_service:${AUTH_DB_PASSWORD}@postgres:5432/auth_db?sslmode=disable
+
+      JWT_PRIVATE_KEY_PATH: /run/secrets/auth-jwt-private.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
+      JWT_EXPIRY: ${AUTH_JWT_EXPIRY:-15m}
+
+      GOOGLE_CLIENT_ID: ${AUTH_GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${AUTH_GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URL: ${AUTH_GOOGLE_REDIRECT_URL:-http://localhost:8000/api/v1/auth/google/callback}
+
+      SMTP_HOST: ${AUTH_SMTP_HOST:-mock}
+      SMTP_PORT: ${AUTH_SMTP_PORT:-587}
+      SMTP_USERNAME: ${AUTH_SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${AUTH_SMTP_PASSWORD:-}
+      SMTP_FROM: ${AUTH_SMTP_FROM:-noreply@example.com}
+      SMTP_FROM_NAME: ${AUTH_SMTP_FROM_NAME:-Authentication Service}
+
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-private.pem
+        target: /run/secrets/auth-jwt-private.pem
+        read_only: true
+        bind:
+          create_host_path: false
+
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:8080/ready" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    stop_grace_period: 15s
+
+    security_opt:
+      - no-new-privileges:true
+
+
+  catalog-migrate:
+    image: migrate/migrate:v4.18.3
+
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    volumes:
+      - ../Catalog-Service/db/migrations:/migrations:ro
+
+    command:
+      - -path=/migrations
+      - -database=postgres://catalog_service:${CATALOG_DB_PASSWORD}@postgres:5432/catalog_db?sslmode=disable
+      - up
+
+
+  catalog-service:
+    build:
+      context: ../Catalog-Service
+
+    image: erp/catalog-service:dev
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+      catalog-migrate:
+        condition: service_completed_successfully
+
+    environment:
+      PORT: "8081"
+      GIN_MODE: release
+
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
+
+      DATABASE_URL: postgres://catalog_service:${CATALOG_DB_PASSWORD}@postgres:5432/catalog_db?sslmode=disable
+
+      DB_MAX_CONNS: ${CATALOG_DB_MAX_CONNS:-10}
+      DB_MIN_CONNS: ${CATALOG_DB_MIN_CONNS:-2}
+      DB_MAX_CONN_LIFETIME: ${CATALOG_DB_MAX_CONN_LIFETIME:-30m}
+      DB_MAX_CONN_IDLE_TIME: ${CATALOG_DB_MAX_CONN_IDLE_TIME:-5m}
+      DB_HEALTH_CHECK_PERIOD: ${CATALOG_DB_HEALTH_CHECK_PERIOD:-1m}
+      DB_STATEMENT_TIMEOUT: ${CATALOG_DB_STATEMENT_TIMEOUT:-5s}
+
+      HTTP_MAX_BODY_BYTES: ${CATALOG_HTTP_MAX_BODY_BYTES:-1048576}
+      HTTP_SLOW_REQUEST_THRESHOLD: ${CATALOG_HTTP_SLOW_REQUEST_THRESHOLD:-500ms}
+
+      REFERENCE_CACHE_TTL: ${CATALOG_REFERENCE_CACHE_TTL:-45s}
+
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+
+    # Dockerfile uses /health as liveness.
+    # In the complete ERP Compose environment we additionally use
+    # DB-aware readiness here.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/ready" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    stop_grace_period: 15s
+
+    security_opt:
+      - no-new-privileges:true
+
+
+  inventory-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # lib/pq reads the raw password separately, avoiding URI interpolation.
+      PGPASSWORD: ${INVENTORY_DB_PASSWORD:?Set INVENTORY_DB_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../Inventory-Service/db/migrations
+        target: /migrations
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - -path=/migrations
+      - -database=postgres://inventory_service@postgres:5432/inventory_db?sslmode=disable
+      - up
+
+  inventory-service:
+    build:
+      context: ../Inventory-Service
+    image: erp/inventory-service:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory-migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8082"
+      DATABASE_URL: postgres://inventory_service@postgres:5432/inventory_db?sslmode=disable
+      # pgx reads PGPASSWORD. Reserved password characters never enter the URI.
+      PGPASSWORD: ${INVENTORY_DB_PASSWORD:?Set INVENTORY_DB_PASSWORD}
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
+      SHUTDOWN_TIMEOUT: 10s
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    # Internal-only by default. Clients use Kong's port 8000.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/ready" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   postgres_data:

@@ -1,0 +1,5 @@
+# Explicit opt-in for local debugging; authentication remains enforced.
+services:
+  catalog-service:
+    ports:
+      - "127.0.0.1:${CATALOG_DEV_PORT:-8081}:8081"
