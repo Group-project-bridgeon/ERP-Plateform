@@ -1,0 +1,45 @@
+# Overlay ONLY docker-compose.security-test.yml; never the normal stack.
+services:
+  postgres:
+    environment:
+      INVENTORY_FIXTURE_PASSWORD: ${INVENTORY_FIXTURE_PASSWORD:?Run the test script}
+    volumes:
+      - type: bind
+        source: ./scripts/inventory-test-init.sh
+        target: /docker-entrypoint-initdb.d/02-inventory.sh
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      # TCP avoids accepting the entrypoint's temporary initialization server.
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h 127.0.0.1 -U security_test -d inventory_db -tAc 'SELECT 1' >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+  inventory-migrate:
+    extends:
+      file: docker-compose.yml
+      service: inventory-migrate
+    environment:
+      PGPASSWORD: ${INVENTORY_FIXTURE_PASSWORD:?Run the test script}
+  inventory-service:
+    extends:
+      file: docker-compose.yml
+      service: inventory-service
+    image: ${INVENTORY_FIXTURE_IMAGE:?Run the test script}
+    restart: "no"
+    environment:
+      PGPASSWORD: ${INVENTORY_FIXTURE_PASSWORD:?Run the test script}
+      JWT_ISSUER: erp-auth
+      JWT_AUDIENCE: erp-api
+    volumes:
+      - type: bind
+        source: ${SECURITY_TEST_KEY_DIR:?Run the test script}/public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+  kong:
+    depends_on:
+      inventory-service:
+        condition: service_healthy
