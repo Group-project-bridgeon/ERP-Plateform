@@ -1,5 +1,9 @@
 # Inventory Docker/Kong verification record
 
+Latest checkpoint: **2026-10-25 — GATEWAY VERIFIED for Stock Read APIs**, recorded
+at the end of this document. The original warehouse-delivery record below remains
+historical and is not evidence of normal deployment.
+
 Executed 2026-10-22. Verdict: READY FOR REVIEW.
 Implementation complete; isolated verification passed; normal deployment not performed.
 
@@ -90,3 +94,76 @@ definitions do not grant access; fresh-login GLOBAL assignments require the
 approved role workflow. Resolve prior credential-exposure follow-ups separately.
 This milestone does not complete the Inventory service or ERP; Fulfillment/Delivery
 is planned as a separate internal Inventory module and stock workflows remain later.
+
+## Stock Read APIs gateway verification (2026-10-25)
+
+Verdict: **GATEWAY VERIFIED** in the disposable fixture. Normal deployment, normal
+grants and the wider Stock Foundation/Inventory Service remain incomplete.
+
+The fixture now asserts actual migrated versions Inventory 3:false, Auth 8:false
+and Catalog 3:false. Auth's two stock-read definitions exist without application
+migrations assigning users/grants. Test setup explicitly creates six isolated
+human profiles and authenticates them through real Auth login and /me via Kong.
+
+| Identity / negative case | Balances | Movements |
+| --- | --- | --- |
+| Missing / malformed / tampered / locally signed expired token | 401 | 401 |
+| Real login, no stock grants | 403 | 403 |
+| Real login, balance-only GLOBAL grant | 200 | 403 |
+| Real login, movement-only GLOBAL grant | 403 | 200 |
+| Real login, both GLOBAL grants | 200 | 200 |
+| Real login, equivalent WAREHOUSE-only grants | 403 | 403 |
+| Real login, warehouse-management read only | 403 | 403 |
+
+Routes are GET /api/v1/inventory/warehouses/:id/stock-balances with
+inventory.stock-balances:read, and GET on /stock-movements with
+inventory.stock-movements:read. Positive status/data assertions and Kong Via
+headers prove the full path and Authorization header reached Inventory.
+
+The unchanged warehouse gateway regression passed first (11.72s). The new
+TestStockReadGateway passed (3.54s; package 6.660s). Real internal posting with
+explicit synthetic references created 105 balances, 107 movements, eight operations
+and eight completed keys across two populated new warehouses plus an empty one.
+The first populated warehouse was then made inactive. There were five warehouses
+in total, including the two preserved warehouse-regression records.
+
+The main variant received 9007199254741093 pieces and issued three, leaving
+9007199254741090, verified against PostgreSQL and exact string JSON. Another pair
+returned to zero; selected packs retain factor six and historical labels. Gateway
+checks covered variant/nonzero filtering, warehouse isolation, 50/100 limits,
+complete static pagination, cursor/filter/warehouse mismatch rejection, malformed
+input 400, nonexistent warehouse 404 and existing empty items:[].
+
+The fixture Catalog service was stopped before stock setup/read checks. Optional
+reference clients stayed disabled. Product/pack snapshots came from synthetic test
+adapters; no live Catalog provenance is claimed. Before/after stock-table SHA256:
+fd4c86982ac393bec4a162dfd3aaf7e18020f03a9e04072e0fe11a0db3dabf41
+matched exactly over balances, operations, movements and idempotency records.
+
+Actual final commands/checks:
+
+- PowerShell parser: passed. -ConfigurationOnly: exit 0, without runtime claims.
+- Full scripts/test-inventory-gateway.ps1: exit 0, real Kong 3.9.3, actual Auth login
+  and /me, existing warehouse/Auth/Catalog route regressions and stock reads passed.
+- Auth, Catalog and Inventory runtime UID=100; internal Inventory health/ready 200;
+  no published Inventory port; fixture role is non-superuser/non-role-creator.
+- Inventory go test ./internal/security ./internal/router ./internal/integration:
+  exit 0; ordinary fixture cases skip without flags. Explicit ungated new-test run
+  reports SKIP; the full harness supplies the runtime evidence.
+- go vet ./internal/integration and go build ./...: exit 0; changed Go formatting,
+  fixture parser and scoped whitespace checks passed.
+- Inventory SIGTERM exit 0. Fixture containers/network/images/temp files were
+  cleaned and environment restored. All 36 pre-existing container IDs/start times/
+  running states/restart counts matched before/after.
+
+Gateway machine-token coverage is NOT TESTED: the human-login fixture deliberately
+does not enable TLS machine issuance. Existing Inventory security/router tests keep
+the separation evidence. No concurrent-write snapshot-stability or real network
+disruption claim is made. Successful tokens are actual login-issued; the locally
+signed expired token is solely a labeled negative test.
+
+Detailed source/state/check evidence is in workspace
+review-artifacts/stock-read-gateway/20261025T064438Z/report.md. Existing Inventory
+warehouse_test.go and all previous source/migrations/dirty work are byte-preserved;
+the new Go test is separate. Authentication/Catalog source, normal Compose, Kong
+configuration, real .env/keys/accounts and normal services were unchanged.

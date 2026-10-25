@@ -6,7 +6,7 @@ $platform = Split-Path $PSScriptRoot -Parent
 $inventory = Join-Path (Split-Path $platform -Parent) 'Inventory-Service'
 $project = 'inventory-gateway-' + [guid]::NewGuid().ToString('N').Substring(0,12)
 $temporary = Join-Path ([IO.Path]::GetTempPath()) $project
-$names = @('SECURITY_TEST_DB_PASSWORD','SECURITY_TEST_KEY_DIR','INVENTORY_FIXTURE_PASSWORD','INVENTORY_DB_PASSWORD','INVENTORY_FIXTURE_IMAGE','WAREHOUSE_GATEWAY_ISOLATED','WAREHOUSE_AUTH_DATABASE_URL','WAREHOUSE_INVENTORY_DATABASE_URL','WAREHOUSE_AUTH_URL','WAREHOUSE_INVENTORY_URL','WAREHOUSE_PUBLIC_KEY','WAREHOUSE_NEGATIVE_PRIVATE_KEY')
+$names = @('SECURITY_TEST_DB_PASSWORD','SECURITY_TEST_KEY_DIR','INVENTORY_FIXTURE_PASSWORD','INVENTORY_DB_PASSWORD','INVENTORY_FIXTURE_IMAGE','WAREHOUSE_GATEWAY_ISOLATED','WAREHOUSE_AUTH_DATABASE_URL','WAREHOUSE_INVENTORY_DATABASE_URL','WAREHOUSE_AUTH_URL','WAREHOUSE_INVENTORY_URL','WAREHOUSE_PUBLIC_KEY','WAREHOUSE_NEGATIVE_PRIVATE_KEY','STOCK_GATEWAY_RUN_ID','STOCK_GATEWAY_ISOLATED')
 $previous = @{}
 foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
 $compose = @('compose','--project-name',$project,'--env-file',(Join-Path $temporary 'empty.env'),'-f',(Join-Path $platform 'docker-compose.security-test.yml'),'-f',(Join-Path $platform 'docker-compose.inventory-test.yml'))
@@ -14,6 +14,12 @@ $started = $false
 $imageWorkStarted = $false
 $contextImage = "erp/inventory-context-test:$project"
 $cleanupFailures = [Collections.Generic.List[string]]::new()
+function ContainerSnapshot {
+    $ids=@(Invoke-Docker @('ps','-aq','--no-trunc'))
+    $snapshot=@{}
+    foreach($container in $ids){if($container){$snapshot[$container]=([string](Invoke-Docker @('inspect','--format','{{.Id}}|{{.State.StartedAt}}|{{.State.Running}}|{{.RestartCount}}',$container))).Trim()}}
+    return $snapshot
+}
 function Invoke-Docker([string[]]$DockerArgs) {
     # Keep stderr (including interpolation warnings) out of JSON stdout.
     # Never render raw diagnostics, which can include environment values.
@@ -28,11 +34,13 @@ function CheckSQL([string]$Database,[string]$Query,[string]$Expected,[string]$La
     Write-Host "PASS: $Label = $Expected"
 }
 try {
+    $normalBefore=ContainerSnapshot
     New-Item -ItemType Directory -Path $temporary | Out-Null
     [IO.File]::WriteAllText((Join-Path $temporary 'empty.env'),'')
     $random = [byte[]]::new(32)
     [Security.Cryptography.RandomNumberGenerator]::Fill($random)
     $env:SECURITY_TEST_DB_PASSWORD = [Convert]::ToHexString($random).ToLowerInvariant()
+    $env:STOCK_GATEWAY_RUN_ID=$project
     # Exercise URI-reserved characters through raw PGPASSWORD.
     $env:INVENTORY_FIXTURE_PASSWORD = $env:SECURITY_TEST_DB_PASSWORD + '@:/?#%+$ space'
     $env:INVENTORY_DB_PASSWORD = $env:INVENTORY_FIXTURE_PASSWORD
@@ -104,9 +112,10 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     $internalExit = $LASTEXITCODE
     if ($internalExit -eq 0 -or ([string]::Join("`n",[string[]]@($internal))) -notmatch 'HTTP/1\.[01] 401') { throw 'Direct internal unauthenticated request did not return 401' }
     Write-Host 'PASS: direct internal warehouse request HTTP 401.'
-    CheckSQL 'inventory_db' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '1:false' 'Inventory migration'
-    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '6:false' 'Auth migration dependency'
-    CheckSQL 'catalog_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '2:false' 'Catalog routing fixture migrations'
+    CheckSQL 'inventory_db' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '3:false' 'Inventory migration'
+    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '8:false' 'Auth migration dependency'
+    CheckSQL 'catalog_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '3:false' 'Catalog routing fixture migrations'
+    CheckSQL 'auth_security_test' "SELECT count(*) FROM identity_permissions WHERE action='read' AND resource IN ('inventory.stock-balances','inventory.stock-movements')" '2' 'Stock read definitions'
     CheckSQL 'inventory_db' "SELECT rolsuper::int+rolcreatedb::int+rolcreaterole::int FROM pg_roles WHERE rolname='inventory_service'" '0' 'Inventory role restricted'
     $dbAddress = ([string](Fixture @('port','postgres','5432'))).Trim()
     $gatewayAddress = ([string](Fixture @('port','kong','8000'))).Trim()
@@ -122,6 +131,13 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     if ($LASTEXITCODE -ne 0) { throw 'Kong warehouse integration failed' }
     CheckSQL 'inventory_db' 'SELECT count(*) FROM warehouses' '2' 'Persisted warehouse rows'
     CheckSQL 'inventory_db' 'SELECT count(*) FROM warehouses WHERE is_default AND is_active' '1' 'Persisted active default'
+    # Preserve the existing warehouse test unchanged, then run independent stock
+    # fixtures. Catalog is deliberately unavailable during all stock read requests.
+    Fixture @('stop','catalog-service') | Out-Null
+    $env:STOCK_GATEWAY_ISOLATED='1'
+    & go -C $inventory test -count=1 -timeout=240s -v ./internal/integration -run '^TestStockReadGateway$'
+    if($LASTEXITCODE -ne 0){throw 'Kong stock read integration failed'}
+    CheckSQL 'inventory_db' 'SELECT count(*) FROM warehouses' '5' 'Warehouse fixture rows after stock setup'
     Fixture @('stop','inventory-service') | Out-Null
     $exitCode = ([string](Invoke-Docker @('inspect','--format','{{.State.ExitCode}}',$id))).Trim()
     if ($exitCode -ne '0') { throw 'Inventory did not shut down gracefully' }
@@ -151,5 +167,6 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     if (!$resolved.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $resolved -Leaf) -ne $project) { throw 'Refusing temporary cleanup outside generated directory' }
     try { if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force } } catch { $cleanupFailures.Add('Temporary fixture file cleanup failed') }
     if ($cleanupFailures.Count) { throw ($cleanupFailures -join '; ') }
+    if($null -ne $normalBefore){foreach($container in $normalBefore.Keys){$after=([string](Invoke-Docker @('inspect','--format','{{.Id}}|{{.State.StartedAt}}|{{.State.Running}}|{{.RestartCount}}',$container))).Trim();if($after -ne $normalBefore[$container]){throw 'A pre-existing container identity/start/state changed during verification'}};Write-Host "PASS: $($normalBefore.Count) pre-existing containers retained IDs/start times/states/restart counts."}
     Write-Host 'PASS: generated fixture artifacts cleaned; previous environment restored.'
 }
