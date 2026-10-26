@@ -1,0 +1,85 @@
+# Explicit normal LOCAL overlay. Use with the protected local.env outside Git.
+services:
+  auth-service:
+    environment:
+      TLS_CERT_PATH: /run/opening-tls/server.pem
+      TLS_KEY_PATH: /run/opening-tls/server-key.pem
+      MACHINE_JWT_EXPIRY: 5m
+    volumes:
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/auth-service.pem"
+        target: /run/opening-tls/server.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/auth-service-key.pem"
+        target: /run/opening-tls/server-key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/auth-trust-bundle.pem"
+        target: /etc/ssl/certs/ca-certificates.crt
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- https://localhost:8080/ready >/dev/null || exit 1']
+  catalog-service:
+    environment:
+      TLS_CERT_PATH: /run/opening-tls/server.pem
+      TLS_KEY_PATH: /run/opening-tls/server-key.pem
+      CATALOG_STOCK_REFERENCES_ENABLED: "true"
+    volumes:
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/catalog-service.pem"
+        target: /run/opening-tls/server.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/catalog-service-key.pem"
+        target: /run/opening-tls/server-key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/catalog-trust-bundle.pem"
+        target: /etc/ssl/certs/ca-certificates.crt
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- https://localhost:8081/ready >/dev/null || exit 1']
+  inventory-service:
+    environment:
+      OPENING_STOCK_ENABLED: "true"
+      STOCK_REFERENCE_ENABLED: "true"
+      STOCK_AUTH_TOKEN_URL: https://auth-service:8080/api/v1/auth/service-token
+      STOCK_CATALOG_BATCH_URL: https://catalog-service:8081/api/v1/catalog/stock-references/batch
+      STOCK_MACHINE_ID: ${OPENING_LOCAL_MACHINE_ID:?Set provisioned local machine ID}
+      STOCK_CREDENTIAL_SECRET_FILE: /run/opening/credential.json
+      STOCK_CA_FILE: /run/opening/root-ca.pem
+      STOCK_AUTH_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+    volumes:
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/inventory-credential.json"
+        target: /run/opening/credential.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/root-ca.pem"
+        target: /run/opening/root-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+  kong:
+    volumes:
+      - type: bind
+        source: "${OPENING_LOCAL_DIR:?Set protected local directory}/kong.yml"
+        target: /kong/declarative/kong.yml
+        read_only: true
+        bind:
+          create_host_path: false
