@@ -1,15 +1,17 @@
 #Requires -Version 7.4
 [CmdletBinding()]
-param([switch]$ConfigurationOnly)
+param([switch]$ConfigurationOnly,[switch]$OpeningStock)
 $ErrorActionPreference = 'Stop'
 $platform = Split-Path $PSScriptRoot -Parent
 $inventory = Join-Path (Split-Path $platform -Parent) 'Inventory-Service'
 $project = 'inventory-gateway-' + [guid]::NewGuid().ToString('N').Substring(0,12)
 $temporary = Join-Path ([IO.Path]::GetTempPath()) $project
 $names = @('SECURITY_TEST_DB_PASSWORD','SECURITY_TEST_KEY_DIR','INVENTORY_FIXTURE_PASSWORD','INVENTORY_DB_PASSWORD','INVENTORY_FIXTURE_IMAGE','WAREHOUSE_GATEWAY_ISOLATED','WAREHOUSE_AUTH_DATABASE_URL','WAREHOUSE_INVENTORY_DATABASE_URL','WAREHOUSE_AUTH_URL','WAREHOUSE_INVENTORY_URL','WAREHOUSE_PUBLIC_KEY','WAREHOUSE_NEGATIVE_PRIVATE_KEY','STOCK_GATEWAY_RUN_ID','STOCK_GATEWAY_ISOLATED')
+$names += @('OPENING_FIXTURE_MACHINE_ID','OPENING_GATEWAY_ISOLATED','OPENING_CATALOG_DATABASE_URL')
 $previous = @{}
 foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
 $compose = @('compose','--project-name',$project,'--env-file',(Join-Path $temporary 'empty.env'),'-f',(Join-Path $platform 'docker-compose.security-test.yml'),'-f',(Join-Path $platform 'docker-compose.inventory-test.yml'))
+if ($OpeningStock) { $compose += @('-f',(Join-Path $platform 'docker-compose.opening-test.yml')) }
 $started = $false
 $imageWorkStarted = $false
 $contextImage = "erp/inventory-context-test:$project"
@@ -51,6 +53,30 @@ try {
         [IO.File]::WriteAllText((Join-Path $temporary 'private.pem'),$rsa.ExportRSAPrivateKeyPem())
         [IO.File]::WriteAllText((Join-Path $temporary 'public.pem'),$rsa.ExportSubjectPublicKeyInfoPem())
     } finally { $rsa.Dispose() }
+    if ($OpeningStock) {
+        $env:OPENING_FIXTURE_MACHINE_ID=[guid]::NewGuid().ToString()
+        $credentialID=[guid]::NewGuid().ToString()
+        $secretBytes=[byte[]]::new(32);[Security.Cryptography.RandomNumberGenerator]::Fill($secretBytes)
+        $secret=[Convert]::ToBase64String($secretBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+        $secretHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($secretBytes)).ToLowerInvariant()
+        [IO.File]::WriteAllText((Join-Path $temporary 'credential.json'),(@{credential_id=$credentialID;secret=$secret}|ConvertTo-Json -Compress))
+        $tlsKey=[Security.Cryptography.RSA]::Create(2048)
+        try {
+            $req=[Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=isolated-opening-fixture',$tlsKey,[Security.Cryptography.HashAlgorithmName]::SHA256,[Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $san=[Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new();$san.AddDnsName('auth-service');$san.AddDnsName('catalog-service');$san.AddDnsName('localhost');$req.CertificateExtensions.Add($san.Build())
+            $req.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true,$false,0,$true))
+            $cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-1),[DateTimeOffset]::UtcNow.AddHours(2))
+            $pem=$cert.ExportCertificatePem()
+            [IO.File]::WriteAllText((Join-Path $temporary 'server.pem'),$pem)
+            [IO.File]::WriteAllText((Join-Path $temporary 'server-key.pem'),$tlsKey.ExportPkcs8PrivateKeyPem())
+            $caID=[guid]::NewGuid().ToString()
+            $kong=Get-Content -LiteralPath (Join-Path $platform 'infrastructure/kong/kong.yml') -Raw
+            $kong=$kong.Replace('url: http://auth-service:8080',"url: https://auth-service:8080`n    tls_verify: true`n    ca_certificates: [$caID]").Replace('url: http://catalog-service:8081',"url: https://catalog-service:8081`n    tls_verify: true`n    ca_certificates: [$caID]")
+            $kong += "`nca_certificates:`n  - id: $caID`n    cert: |`n" + (($pem -split '\r?\n' | ForEach-Object { '      '+$_ }) -join "`n") + "`n"
+            [IO.File]::WriteAllText((Join-Path $temporary 'kong.yml'),$kong)
+            $cert.Dispose()
+        } finally {$tlsKey.Dispose()}
+    }
     # Validate normal configuration with placeholders, never regular .env.
     $normal = @('compose','--project-name',$project,'--env-file',(Join-Path $platform '.env.example'),'-f',(Join-Path $platform 'docker-compose.yml'))
     Invoke-Docker ($normal + @('config','--quiet')) | Out-Null
@@ -112,8 +138,8 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     $internalExit = $LASTEXITCODE
     if ($internalExit -eq 0 -or ([string]::Join("`n",[string[]]@($internal))) -notmatch 'HTTP/1\.[01] 401') { throw 'Direct internal unauthenticated request did not return 401' }
     Write-Host 'PASS: direct internal warehouse request HTTP 401.'
-    CheckSQL 'inventory_db' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '3:false' 'Inventory migration'
-    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '8:false' 'Auth migration dependency'
+    CheckSQL 'inventory_db' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '4:false' 'Inventory migration'
+    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '9:false' 'Auth migration dependency'
     CheckSQL 'catalog_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '3:false' 'Catalog routing fixture migrations'
     CheckSQL 'auth_security_test' "SELECT count(*) FROM identity_permissions WHERE action='read' AND resource IN ('inventory.stock-balances','inventory.stock-movements')" '2' 'Stock read definitions'
     CheckSQL 'inventory_db' "SELECT rolsuper::int+rolcreatedb::int+rolcreaterole::int FROM pg_roles WHERE rolname='inventory_service'" '0' 'Inventory role restricted'
@@ -138,6 +164,17 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     & go -C $inventory test -count=1 -timeout=240s -v ./internal/integration -run '^TestStockReadGateway$'
     if($LASTEXITCODE -ne 0){throw 'Kong stock read integration failed'}
     CheckSQL 'inventory_db' 'SELECT count(*) FROM warehouses' '5' 'Warehouse fixture rows after stock setup'
+    if ($OpeningStock) {
+        Fixture @('up','-d','--no-deps','--wait','catalog-service') | Out-Null
+        $machineSQL="INSERT INTO machine_identities(id,enabled) VALUES('$env:OPENING_FIXTURE_MACHINE_ID',true); INSERT INTO machine_grants(machine_id,audience,permission) VALUES('$env:OPENING_FIXTURE_MACHINE_ID','catalog-stock-references','catalog.stock-references:read'); INSERT INTO machine_credentials(id,machine_id,secret_hash,created_at,expires_at) VALUES('$credentialID','$env:OPENING_FIXTURE_MACHINE_ID',decode('$secretHash','hex'),clock_timestamp(),clock_timestamp()+interval '1 hour');"
+        Fixture @('exec','-T','postgres','psql','-X','-v','ON_ERROR_STOP=1','-U','security_test','-d','auth_security_test','-c',$machineSQL) | Out-Null
+        Fixture @('exec','-T','postgres','psql','-X','-v','ON_ERROR_STOP=1','-U','security_test','-d','catalog_security_test','-c',"ALTER DATABASE catalog_security_test SET stock.gateway_fixture='$project'") | Out-Null
+        $env:OPENING_CATALOG_DATABASE_URL="postgres://security_test:$($env:SECURITY_TEST_DB_PASSWORD)@${dbAddress}/catalog_security_test?sslmode=disable"
+        $env:OPENING_GATEWAY_ISOLATED='1'
+        & go -C $inventory test -count=1 -timeout=240s -v ./internal/integration -run '^TestOpeningStockGateway$'
+        if($LASTEXITCODE -ne 0){throw 'Opening Stock HTTPS/Kong integration failed'}
+        Write-Host 'PASS: real human login, HTTPS machine issuance, preparation/post/read/replay through Kong.'
+    }
     Fixture @('stop','inventory-service') | Out-Null
     $exitCode = ([string](Invoke-Docker @('inspect','--format','{{.State.ExitCode}}',$id))).Trim()
     if ($exitCode -ne '0') { throw 'Inventory did not shut down gracefully' }
