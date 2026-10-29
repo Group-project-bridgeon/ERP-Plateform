@@ -27,3 +27,17 @@ services:
         paths:
           - /api/v1/auth
         strip_path: false
+
+  - name: purchasing-service
+    url: http://purchasing-service:8080/api/v1/
+    routes:
+      - name: purchasing-api-exact
+        paths:
+          - "~/^/api/v1/purchasing$"
+        strip_path: true
+        path_handling: v0
+      - name: purchasing-api-descendants
+        paths:
+          - /api/v1/purchasing/
+        strip_path: true
+        path_handling: v0

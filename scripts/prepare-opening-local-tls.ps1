@@ -13,7 +13,7 @@ if(!$KongTemplateFile){$KongTemplateFile=Join-Path $platform 'infrastructure/kon
 if(![IO.Path]::IsPathFullyQualified($OutputDirectory)){throw 'OutputDirectory must be an absolute protected path outside all repositories'}
 $dir=[IO.Path]::GetFullPath($OutputDirectory)
 if(Test-Path -LiteralPath $dir){throw 'Refusing to overwrite existing local material'}
-foreach($repo in @('Authentication','Catalog-Service','Inventory-Service','ERP-Platform')){
+foreach($repo in @('Authentication','Catalog-Service','Inventory-Service','purchasing','ERP-Platform')){
  $prefix=[IO.Path]::GetFullPath((Join-Path $workspace $repo))+[IO.Path]::DirectorySeparatorChar
  if(($dir+[IO.Path]::DirectorySeparatorChar).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){throw 'OutputDirectory must be outside repository/build contexts'}
 }
@@ -57,11 +57,7 @@ try {
    $leaf.Dispose()
   }finally{$key.Dispose()}
  }
- $caID=[guid]::NewGuid().ToString()
- $kong=$template
- foreach($entry in @(@('auth-service','8080'),@('catalog-service','8081'))){$kong=$kong.Replace("url: http://$($entry[0]):$($entry[1])","url: https://$($entry[0]):$($entry[1])`n    tls_verify: true`n    ca_certificates: [$caID]")}
- $kong+="`nca_certificates:`n  - id: $caID`n    cert: |`n"+(($ca.ExportCertificatePem() -split '\r?\n'|ForEach-Object{'      '+$_}) -join "`n")+"`n"
- [IO.File]::WriteAllText((Join-Path $dir 'kong.yml'),$kong)
+ & (Join-Path $PSScriptRoot 'render-opening-local-kong.ps1') -OutputFile (Join-Path $dir 'kong.yml') -TrustBundleFile (Join-Path $dir 'root-ca.pem') -KongTemplateFile $KongTemplateFile | Out-Null
  $certificates|ConvertTo-Json -Depth 4|Set-Content (Join-Path $dir 'certificate-metadata.json') -Encoding utf8
  foreach($name in @('auth-service','catalog-service')){
   $file=if($name -eq 'auth-service'){'auth-trust-bundle.pem'}else{'catalog-trust-bundle.pem'}

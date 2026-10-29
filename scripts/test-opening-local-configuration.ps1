@@ -59,6 +59,19 @@ try {
  $model=([string]::Join("`n",$raw))|ConvertFrom-Json
  if($model.services.'inventory-service'.environment.OPENING_STOCK_ENABLED -ne 'true'){throw 'Opening flag missing'}
  foreach($svc in @('auth-service','catalog-service','inventory-service','kong')){foreach($mount in $model.services.$svc.volumes){if($mount.source.Replace('\','/').StartsWith($material.Replace('\','/'))){if(!$mount.read_only -or $mount.bind.create_host_path -ne $false){throw 'Unsafe runtime bind semantics'};if($mount.source -match 'root-ca-key'){throw 'Private CA mounted'}}}}
+ $purchasing=$model.services.'purchasing-service'
+ if($purchasing.ports -or $purchasing.environment.OUTBOX_PUBLISHER_ENABLED -ne 'false' -or $purchasing.depends_on.'purchasing-migrate'.condition -ne 'service_completed_successfully'){throw 'Purchasing local compatibility invalid'}
+ $public=@($purchasing.volumes|Where-Object {$_.target -eq '/run/secrets/auth-jwt-public.pem'})
+ if($public.Count -ne 1 -or !$public[0].read_only -or $public[0].bind.create_host_path -ne $false){throw 'Purchasing public-key scope invalid'}
+ $beforeKong=(Get-FileHash -LiteralPath (Join-Path $material 'kong.yml') -Algorithm SHA256).Hash
+ & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'render-opening-local-kong.ps1') -OutputFile (Join-Path $material 'kong.yml') -TrustBundleFile (Join-Path $material 'root-ca.pem') *> $null
+ if($LASTEXITCODE -eq 0 -or (Get-FileHash -LiteralPath (Join-Path $material 'kong.yml') -Algorithm SHA256).Hash -ne $beforeKong){throw 'Renderer overwrote existing configuration'}
+ & pwsh -NoProfile -File $wrapper -LocalEnvFile $localEnv -BaseEnvFile $baseEnv -ProjectName $run -Action Build -Services purchasing-migrate *> $null
+ if($LASTEXITCODE -eq 0){throw 'Migration-only Build accepted'}
+ $missingPurchasing=Join-Path $temporary 'missing-purchasing.env'
+ [IO.File]::WriteAllLines($missingPurchasing,[string[]]@(Get-Content -LiteralPath $baseEnv|Where-Object {$_ -notmatch '^PURCHASING_DB_PASSWORD='}))
+ & pwsh -NoProfile -File $wrapper -LocalEnvFile $localEnv -BaseEnvFile $missingPurchasing -ProjectName $run -Action Validate *> $null
+ if($LASTEXITCODE -eq 0){throw 'Missing Purchasing password accepted'}
  $model=$null;$raw=$null
  $missing=Join-Path $temporary 'missing.env';[IO.File]::WriteAllText($missing,'')
  & pwsh -NoProfile -File $wrapper -LocalEnvFile $missing -BaseEnvFile $baseEnv -ProjectName $run -Action Validate *> $null

@@ -1,17 +1,25 @@
 #Requires -Version 7.4
 [CmdletBinding()]
-param([switch]$ConfigurationOnly,[switch]$OpeningStock)
+param([switch]$ConfigurationOnly,[switch]$OpeningStock,[switch]$StockAdjustments,[switch]$Reservations,[switch]$Fulfillment)
+if ($Fulfillment) { $Reservations=$true }
+if ($Reservations) { $StockAdjustments=$true }
+if ($StockAdjustments) { $OpeningStock=$true }
 $ErrorActionPreference = 'Stop'
 $platform = Split-Path $PSScriptRoot -Parent
 $inventory = Join-Path (Split-Path $platform -Parent) 'Inventory-Service'
 $project = 'inventory-gateway-' + [guid]::NewGuid().ToString('N').Substring(0,12)
 $temporary = Join-Path ([IO.Path]::GetTempPath()) $project
 $names = @('SECURITY_TEST_DB_PASSWORD','SECURITY_TEST_KEY_DIR','INVENTORY_FIXTURE_PASSWORD','INVENTORY_DB_PASSWORD','INVENTORY_FIXTURE_IMAGE','WAREHOUSE_GATEWAY_ISOLATED','WAREHOUSE_AUTH_DATABASE_URL','WAREHOUSE_INVENTORY_DATABASE_URL','WAREHOUSE_AUTH_URL','WAREHOUSE_INVENTORY_URL','WAREHOUSE_PUBLIC_KEY','WAREHOUSE_NEGATIVE_PRIVATE_KEY','STOCK_GATEWAY_RUN_ID','STOCK_GATEWAY_ISOLATED')
-$names += @('OPENING_FIXTURE_MACHINE_ID','OPENING_GATEWAY_ISOLATED','OPENING_CATALOG_DATABASE_URL')
+ $names += @('RESERVATION_GATEWAY_ISOLATED','RESERVATION_OUTAGE_ISOLATED','RESERVATION_TLS_GATEWAY_URL','RESERVATION_GATEWAY_CA_FILE','RESERVATION_SALES_CREDENTIAL_FILE','RESERVATION_OTHER_CREDENTIAL_FILE','RESERVATION_FIXTURE_STATE_FILE','GOMAXPROCS')
+$names += @('FULFILLMENT_GATEWAY_ISOLATED','FULFILLMENT_OUTAGE_ISOLATED','FULFILLMENT_STATE_FILE','FULFILLMENT_HUMAN_FILE')
+$names += @('ADJUSTMENT_GATEWAY_ISOLATED','OPENING_FIXTURE_MACHINE_ID','OPENING_GATEWAY_ISOLATED','OPENING_CATALOG_DATABASE_URL')
 $previous = @{}
 foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
 $compose = @('compose','--project-name',$project,'--env-file',(Join-Path $temporary 'empty.env'),'-f',(Join-Path $platform 'docker-compose.security-test.yml'),'-f',(Join-Path $platform 'docker-compose.inventory-test.yml'))
 if ($OpeningStock) { $compose += @('-f',(Join-Path $platform 'docker-compose.opening-test.yml')) }
+if ($StockAdjustments) { $compose += @('-f',(Join-Path $platform 'docker-compose.adjustment-test.yml')) }
+if ($Reservations) { $compose += @('-f',(Join-Path $platform 'docker-compose.reservation-test.yml')) }
+if ($Fulfillment) { $compose += @('-f',(Join-Path $platform 'docker-compose.fulfillment-test.yml')) }
 $started = $false
 $imageWorkStarted = $false
 $contextImage = "erp/inventory-context-test:$project"
@@ -30,12 +38,16 @@ function Invoke-Docker([string[]]$DockerArgs) {
     return $output
 }
 function Fixture([string[]]$FixtureArgs) { Invoke-Docker ($compose + $FixtureArgs) }
+function AuthMigrate([string[]]$Operations) {
+    Fixture (@('run','--rm','--no-deps','auth-migrate','-path=/migrations',"-database=postgres://security_test:$($env:SECURITY_TEST_DB_PASSWORD)@postgres:5432/auth_security_test?sslmode=disable")+$Operations)|Out-Null
+}
 function CheckSQL([string]$Database,[string]$Query,[string]$Expected,[string]$Label) {
     $output = Fixture @('exec','-T','postgres','psql','-X','-t','-A','-v','ON_ERROR_STOP=1','-U','security_test','-d',$Database,'-c',$Query)
     if (([string]::Join('',[string[]]@($output))).Trim() -ne $Expected) { throw "Database assertion failed: $Label" }
     Write-Host "PASS: $Label = $Expected"
 }
 try {
+    $env:GOMAXPROCS='2'
     $normalBefore=ContainerSnapshot
     New-Item -ItemType Directory -Path $temporary | Out-Null
     [IO.File]::WriteAllText((Join-Path $temporary 'empty.env'),'')
@@ -76,6 +88,24 @@ try {
             [IO.File]::WriteAllText((Join-Path $temporary 'kong.yml'),$kong)
             $cert.Dispose()
         } finally {$tlsKey.Dispose()}
+    }
+    $salesClients=@()
+    if ($Reservations) {
+        foreach($label in @('sales','other')) {
+            $salesMachine=[guid]::NewGuid().ToString();$salesCredential=[guid]::NewGuid().ToString()
+            $salesBytes=[byte[]]::new(32);[Security.Cryptography.RandomNumberGenerator]::Fill($salesBytes)
+            $salesSecret=[Convert]::ToBase64String($salesBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $salesHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($salesBytes)).ToLowerInvariant()
+            $salesFile=Join-Path $temporary "$label-credential.json"
+            [IO.File]::WriteAllText($salesFile,(@{client_id=$salesMachine;credential_id=$salesCredential;secret=$salesSecret}|ConvertTo-Json -Compress))
+            $salesClients+=@{ID=$salesMachine;Credential=$salesCredential;Hash=$salesHash;File=$salesFile}
+        }
+        $env:RESERVATION_SALES_CREDENTIAL_FILE=$salesClients[0].File
+        $env:RESERVATION_OTHER_CREDENTIAL_FILE=$salesClients[1].File
+        $env:RESERVATION_GATEWAY_CA_FILE=Join-Path $temporary 'server.pem'
+        $env:RESERVATION_FIXTURE_STATE_FILE=Join-Path $temporary 'reservation-state.json'
+        $env:FULFILLMENT_STATE_FILE=Join-Path $temporary 'fulfillment-state.json'
+        $env:FULFILLMENT_HUMAN_FILE=Join-Path $temporary 'fulfillment-human.json'
     }
     # Validate normal configuration with placeholders, never regular .env.
     $normal = @('compose','--project-name',$project,'--env-file',(Join-Path $platform '.env.example'),'-f',(Join-Path $platform 'docker-compose.yml'))
@@ -138,13 +168,25 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     $internalExit = $LASTEXITCODE
     if ($internalExit -eq 0 -or ([string]::Join("`n",[string[]]@($internal))) -notmatch 'HTTP/1\.[01] 401') { throw 'Direct internal unauthenticated request did not return 401' }
     Write-Host 'PASS: direct internal warehouse request HTTP 401.'
-    CheckSQL 'inventory_db' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '4:false' 'Inventory migration'
-    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '9:false' 'Auth migration dependency'
+    CheckSQL 'inventory_db' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '7:false' 'Inventory migration'
+    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '12:false' 'Auth migration dependency'
+    if ($Reservations) {
+        AuthMigrate @('down','1')
+        CheckSQL 'auth_security_test' "SELECT version::text||':'||dirty::text FROM schema_migrations" '11:false' 'empty fulfillment authority downgrade'
+        AuthMigrate @('up','1')
+        CheckSQL 'auth_security_test' "SELECT version::text||':'||dirty::text FROM schema_migrations" '12:false' 'fulfillment authority reapply'
+        CheckSQL 'auth_security_test' "SELECT count(*) FROM identity_permissions WHERE resource='inventory.reservations'" '0' 'no human reservation permission definitions'
+    }
     CheckSQL 'catalog_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '3:false' 'Catalog routing fixture migrations'
     CheckSQL 'auth_security_test' "SELECT count(*) FROM identity_permissions WHERE action='read' AND resource IN ('inventory.stock-balances','inventory.stock-movements')" '2' 'Stock read definitions'
     CheckSQL 'inventory_db' "SELECT rolsuper::int+rolcreatedb::int+rolcreaterole::int FROM pg_roles WHERE rolname='inventory_service'" '0' 'Inventory role restricted'
     $dbAddress = ([string](Fixture @('port','postgres','5432'))).Trim()
     $gatewayAddress = ([string](Fixture @('port','kong','8000'))).Trim()
+    if ($Reservations) {
+        $tlsAddress=([string](Fixture @('port','kong','8443'))).Trim()
+        if($tlsAddress -notmatch '^127\.0\.0\.1:(\d+)$'){throw 'Unexpected reservation TLS gateway binding'}
+        $env:RESERVATION_TLS_GATEWAY_URL="https://localhost:$($Matches[1])"
+    }
     $env:WAREHOUSE_GATEWAY_ISOLATED = '1'
     $env:WAREHOUSE_AUTH_DATABASE_URL = "postgres://security_test:$($env:SECURITY_TEST_DB_PASSWORD)@${dbAddress}/auth_security_test?sslmode=disable"
     $escapedPassword = [Uri]::EscapeDataString($env:INVENTORY_FIXTURE_PASSWORD)
@@ -153,7 +195,7 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     $env:WAREHOUSE_INVENTORY_URL = $env:WAREHOUSE_AUTH_URL
     $env:WAREHOUSE_PUBLIC_KEY = Join-Path $temporary 'public.pem'
     $env:WAREHOUSE_NEGATIVE_PRIVATE_KEY = Join-Path $temporary 'private.pem'
-    & go -C $inventory test -count=1 -v ./internal/integration -run '^TestIsolatedAuthInventoryGateway$'
+    & go -C $inventory test -p=1 -count=1 -v ./internal/integration -run '^TestIsolatedAuthInventoryGateway$'
     if ($LASTEXITCODE -ne 0) { throw 'Kong warehouse integration failed' }
     CheckSQL 'inventory_db' 'SELECT count(*) FROM warehouses' '2' 'Persisted warehouse rows'
     CheckSQL 'inventory_db' 'SELECT count(*) FROM warehouses WHERE is_default AND is_active' '1' 'Persisted active default'
@@ -161,7 +203,7 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     # fixtures. Catalog is deliberately unavailable during all stock read requests.
     Fixture @('stop','catalog-service') | Out-Null
     $env:STOCK_GATEWAY_ISOLATED='1'
-    & go -C $inventory test -count=1 -timeout=240s -v ./internal/integration -run '^TestStockReadGateway$'
+    & go -C $inventory test -p=1 -count=1 -timeout=240s -v ./internal/integration -run '^TestStockReadGateway$'
     if($LASTEXITCODE -ne 0){throw 'Kong stock read integration failed'}
     CheckSQL 'inventory_db' 'SELECT count(*) FROM warehouses' '5' 'Warehouse fixture rows after stock setup'
     if ($OpeningStock) {
@@ -171,8 +213,57 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
         Fixture @('exec','-T','postgres','psql','-X','-v','ON_ERROR_STOP=1','-U','security_test','-d','catalog_security_test','-c',"ALTER DATABASE catalog_security_test SET stock.gateway_fixture='$project'") | Out-Null
         $env:OPENING_CATALOG_DATABASE_URL="postgres://security_test:$($env:SECURITY_TEST_DB_PASSWORD)@${dbAddress}/catalog_security_test?sslmode=disable"
         $env:OPENING_GATEWAY_ISOLATED='1'
-        & go -C $inventory test -count=1 -timeout=240s -v ./internal/integration -run '^TestOpeningStockGateway$'
+        & go -C $inventory test -p=1 -count=1 -timeout=240s -v ./internal/integration -run '^TestOpeningStockGateway$'
         if($LASTEXITCODE -ne 0){throw 'Opening Stock HTTPS/Kong integration failed'}
+        if ($StockAdjustments) {
+            $env:ADJUSTMENT_GATEWAY_ISOLATED='1'
+            & go -C $inventory test -p=1 -count=1 -timeout=240s -v ./internal/integration -run '^TestStockAdjustmentGateway$'
+            if ($LASTEXITCODE -ne 0) {
+                # Print only fixed diagnostic fields from fixture JSON events.
+                $events=Fixture @('logs','--no-log-prefix','--tail','40','inventory-service')
+                foreach ($line in $events) {
+                    try { $diagnosticEvent=([string]$line)|ConvertFrom-Json -ErrorAction Stop } catch {continue}
+                    $safe=@{};foreach($field in @('component','operation','reason','sqlstate','request_id','status','route')){if($null -ne $diagnosticEvent.$field){$safe[$field]=$diagnosticEvent.$field}}
+                    if($safe.Count){Write-Host ($safe|ConvertTo-Json -Compress)}
+                }
+                throw 'Adjustment/correction HTTPS Kong integration failed'
+            }
+        }
+        if ($Reservations) {
+            foreach($client in $salesClients) {
+                $grants=(@('inventory.reservations:consume','inventory.reservations:read','inventory.reservations:release','inventory.reservations:reserve')|ForEach-Object{"('$($client.ID)','inventory-reservations','$_')"}) -join ','
+                $salesSQL="INSERT INTO machine_identities(id,enabled) VALUES('$($client.ID)',true); INSERT INTO machine_credentials(id,machine_id,secret_hash,created_at,expires_at) VALUES('$($client.Credential)','$($client.ID)',decode('$($client.Hash)','hex'),clock_timestamp(),clock_timestamp()+interval '1 hour'); INSERT INTO machine_grants(machine_id,audience,permission) VALUES $grants;"
+                if ($Fulfillment) {
+                    $fulfillmentGrants=(@('inventory.dispatches:cancel','inventory.dispatches:create','inventory.dispatches:read')|ForEach-Object{"('$($client.ID)','inventory-fulfillment','$_')"}) -join ','
+                    $salesSQL+=" INSERT INTO machine_grants(machine_id,audience,permission) VALUES $fulfillmentGrants;"
+                }
+                Fixture @('exec','-T','postgres','psql','-X','-v','ON_ERROR_STOP=1','-U','security_test','-d','auth_security_test','-c',$salesSQL)|Out-Null
+            }
+            $env:RESERVATION_GATEWAY_ISOLATED='1'
+            & go -C $inventory test -p=1 -count=1 -timeout=240s -v ./internal/integration -run '^TestReservationGateway$'
+            if($LASTEXITCODE -ne 0){throw 'Reservation HTTPS/Kong integration failed'}
+            if ($Fulfillment) {
+                $env:FULFILLMENT_GATEWAY_ISOLATED='1'
+                & go -C $inventory test -p=1 -count=1 -timeout=240s -v ./internal/integration -run '^TestFulfillmentGateway$'
+                if($LASTEXITCODE -ne 0){throw 'Fulfillment HTTPS/Kong acceptance failed'}
+            }
+            Fixture @('stop','catalog-service')|Out-Null
+            $env:RESERVATION_OUTAGE_ISOLATED='1'
+            & go -C $inventory test -p=1 -count=1 -timeout=120s -v ./internal/integration -run '^TestReservationGatewayOutage$'
+            if($LASTEXITCODE -ne 0){throw 'Reservation outage reconciliation failed'}
+            if ($Fulfillment) {
+                $env:FULFILLMENT_OUTAGE_ISOLATED='1'
+                & go -C $inventory test -p=1 -count=1 -timeout=120s -v ./internal/integration -run '^TestFulfillmentGatewayOutage$'
+                if($LASTEXITCODE -ne 0){throw 'Fulfillment outage/replay acceptance failed'}
+            } else { AuthMigrate @('down','1') } # Empty fulfillment authority only; populated reservation grants remain on 11.
+
+            $grantRows=Fixture @('exec','-T','postgres','psql','-X','-t','-A','-v','ON_ERROR_STOP=1','-U','security_test','-d','auth_security_test','-c',"SELECT count(*) FROM machine_grants WHERE audience='inventory-reservations'")
+            $expectedGrants=([string]::Join('',[string[]]@($grantRows))).Trim()
+            $authorityRefused=$false;try{AuthMigrate @('down','1')}catch{$authorityRefused=$true}
+            if(!$authorityRefused){throw 'Populated machine authority downgrade unexpectedly succeeded'}
+            CheckSQL 'auth_security_test' "SELECT count(*) FROM machine_grants WHERE audience='inventory-reservations'" $expectedGrants 'populated authority downgrade preserved grants'
+
+        }
         Write-Host 'PASS: real human login, HTTPS machine issuance, preparation/post/read/replay through Kong.'
     }
     Fixture @('stop','inventory-service') | Out-Null
