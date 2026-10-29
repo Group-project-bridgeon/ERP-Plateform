@@ -1,0 +1,5 @@
+# Disposable only: test-inventory-gateway.ps1 -Fulfillment
+services:
+  inventory-service:
+    environment:
+      STOCK_FULFILLMENT_ENABLED: "true"
