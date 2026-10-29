@@ -291,5 +291,56 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  party-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${PARTY_DB_PASSWORD:?Set PARTY_DB_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../crm_party_servic/db/migrations
+        target: /migrations
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - -path=/migrations
+      - -database=postgres://party_service@postgres:5432/party_db?sslmode=disable
+      - up
+
+  party-service:
+    build:
+      context: ../crm_party_servic
+    image: erp/party-service:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      party-migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8083"
+      ENV: ${PARTY_APP_ENV:-development}
+      DATABASE_URL: postgres://party_service@postgres:5432/party_db?sslmode=disable&pool_max_conns=10
+      PGPASSWORD: ${PARTY_DB_PASSWORD:?Set PARTY_DB_PASSWORD}
+      SHUTDOWN_TIMEOUT_SECONDS: "10"
+    ports:
+      # Temporary direct access for testing; remove once Kong routes to it.
+      - "127.0.0.1:8083:8083"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/health" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   postgres_data:
