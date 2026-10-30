@@ -169,7 +169,7 @@ RUN test ! -e /context/.env && test ! -d /context/keys && test ! -d /context/.gi
     if ($internalExit -eq 0 -or ([string]::Join("`n",[string[]]@($internal))) -notmatch 'HTTP/1\.[01] 401') { throw 'Direct internal unauthenticated request did not return 401' }
     Write-Host 'PASS: direct internal warehouse request HTTP 401.'
     CheckSQL 'inventory_db' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '7:false' 'Inventory migration'
-    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '12:false' 'Auth migration dependency'
+    CheckSQL 'auth_security_test' "SELECT version::text || ':' || dirty::text FROM schema_migrations" '13:false' 'Auth migration dependency'
     if ($Reservations) {
         AuthMigrate @('down','1')
         CheckSQL 'auth_security_test' "SELECT version::text||':'||dirty::text FROM schema_migrations" '11:false' 'empty fulfillment authority downgrade'
