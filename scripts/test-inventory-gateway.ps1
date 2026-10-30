@@ -13,6 +13,7 @@ $names = @('SECURITY_TEST_DB_PASSWORD','SECURITY_TEST_KEY_DIR','INVENTORY_FIXTUR
  $names += @('RESERVATION_GATEWAY_ISOLATED','RESERVATION_OUTAGE_ISOLATED','RESERVATION_TLS_GATEWAY_URL','RESERVATION_GATEWAY_CA_FILE','RESERVATION_SALES_CREDENTIAL_FILE','RESERVATION_OTHER_CREDENTIAL_FILE','RESERVATION_FIXTURE_STATE_FILE','GOMAXPROCS')
 $names += @('FULFILLMENT_GATEWAY_ISOLATED','FULFILLMENT_OUTAGE_ISOLATED','FULFILLMENT_STATE_FILE','FULFILLMENT_HUMAN_FILE')
 $names += @('ADJUSTMENT_GATEWAY_ISOLATED','OPENING_FIXTURE_MACHINE_ID','OPENING_GATEWAY_ISOLATED','OPENING_CATALOG_DATABASE_URL')
+$names += @('PURCHASING_DB_PASSWORD','PARTY_DB_PASSWORD')
 $previous = @{}
 foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
 $compose = @('compose','--project-name',$project,'--env-file',(Join-Path $temporary 'empty.env'),'-f',(Join-Path $platform 'docker-compose.security-test.yml'),'-f',(Join-Path $platform 'docker-compose.inventory-test.yml'))
@@ -60,6 +61,14 @@ try {
     $env:INVENTORY_DB_PASSWORD = $env:INVENTORY_FIXTURE_PASSWORD
     $env:INVENTORY_FIXTURE_IMAGE = "erp/inventory-fixture:$project"
     $env:SECURITY_TEST_KEY_DIR = $temporary.Replace('\','/')
+    # Supply throwaway values for required variables in docker-compose.yml that
+    # are not used by this fixture but whose ':?' guards trigger during config
+    # validation of extended services. Never printed or written to any file.
+    $fixtureRandom = [byte[]]::new(32); [Security.Cryptography.RandomNumberGenerator]::Fill($fixtureRandom)
+    $env:PURCHASING_DB_PASSWORD = [Convert]::ToHexString($fixtureRandom).ToLowerInvariant()
+    [Security.Cryptography.RandomNumberGenerator]::Fill($fixtureRandom)
+    $env:PARTY_DB_PASSWORD = [Convert]::ToHexString($fixtureRandom).ToLowerInvariant()
+    [array]::Clear($fixtureRandom, 0, $fixtureRandom.Length)
     $rsa = [Security.Cryptography.RSA]::Create(2048)
     try {
         [IO.File]::WriteAllText((Join-Path $temporary 'private.pem'),$rsa.ExportRSAPrivateKeyPem())
