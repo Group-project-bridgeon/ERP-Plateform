@@ -1,0 +1,5 @@
+# Disposable only; test-inventory-gateway.ps1 -StockAdjustments adds this overlay.
+services:
+  inventory-service:
+    environment:
+      STOCK_ADJUSTMENTS_ENABLED: "true"

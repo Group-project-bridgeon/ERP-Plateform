@@ -14,6 +14,7 @@ services:
       PARTY_DB_PASSWORD: ${PARTY_DB_PASSWORD}
       PURCHASING_DB_PASSWORD: ${PURCHASING_DB_PASSWORD}
       INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
+      MANAGER_DB_PASSWORD: ${MANAGER_DB_PASSWORD}
       SALES_DB_PASSWORD: ${SALES_DB_PASSWORD}
       RETURNS_DB_PASSWORD: ${RETURNS_DB_PASSWORD}
       FINANCE_DB_PASSWORD: ${FINANCE_DB_PASSWORD}
@@ -213,9 +214,6 @@ services:
         bind:
           create_host_path: false
 
-    # Dockerfile uses /health as liveness.
-    # In the complete ERP Compose environment we additionally use
-    # DB-aware readiness here.
     healthcheck:
       test:
         - CMD-SHELL
@@ -283,6 +281,198 @@ services:
       test:
         - CMD-SHELL
         - 'wget -qO- "http://127.0.0.1:$${PORT}/ready" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  purchasing-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${PURCHASING_DB_PASSWORD:?Set PURCHASING_DB_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../purchasing/db/migrations
+        target: /migrations
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - -path=/migrations
+      - -lock-timeout=15
+      - -database=postgres://purchasing_service@postgres:5432/purchasing_db?sslmode=disable&connect_timeout=5&statement_timeout=10000
+      - up
+
+  purchasing-service:
+    build:
+      context: ../purchasing
+    image: erp/purchasing-service:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      purchasing-migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://purchasing_service@postgres:5432/purchasing_db?sslmode=disable
+      PGPASSWORD: ${PURCHASING_DB_PASSWORD:?Set PURCHASING_DB_PASSWORD}
+      SERVER_PORT: "8080"
+      LISTEN_HOST: 0.0.0.0
+      APP_ENV: production
+      LOG_FORMAT: json
+      LOG_LEVEL: info
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: erp-api
+      OUTBOX_PUBLISHER_ENABLED: "false"
+      HTTP_READ_TIMEOUT: 5s
+      HTTP_WRITE_TIMEOUT: 15s
+      HTTP_IDLE_TIMEOUT: 60s
+      HTTP_MAX_BODY_BYTES: "1048576"
+      REQUEST_TIMEOUT: 5s
+      STARTUP_TIMEOUT: 15s
+      READINESS_TIMEOUT: 1s
+      SHUTDOWN_TIMEOUT: 10s
+      DB_MAX_CONNS: "10"
+      DB_MIN_CONNS: "0"
+      DB_OPERATION_TIMEOUT: 5s
+      DB_MAX_CONN_LIFETIME: 30m
+      DB_MAX_CONN_IDLE_TIME: 5m
+      DB_HEALTH_CHECK_PERIOD: 1m
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    # Internal-only: no host port. Clients use Kong's port 8000.
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1:8080/ready >/dev/null || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  party-migrate:
+    profiles: ["party"]
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${PARTY_DB_PASSWORD:?Set PARTY_DB_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../crm_party_servic/db/migrations
+        target: /migrations
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - -path=/migrations
+      - -database=postgres://party_service@postgres:5432/party_db?sslmode=disable
+      - up
+
+  party-service:
+    profiles: ["party"]
+    build:
+      context: ../crm_party_servic
+    image: erp/party-service:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      party-migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8083"
+      ENV: ${PARTY_APP_ENV:-development}
+      DATABASE_URL: postgres://party_service@postgres:5432/party_db?sslmode=disable&pool_max_conns=10
+      PGPASSWORD: ${PARTY_DB_PASSWORD:?Set PARTY_DB_PASSWORD}
+      SHUTDOWN_TIMEOUT_SECONDS: "10"
+    ports:
+      # Temporary direct access for testing; remove once Kong routes to it.
+      - "127.0.0.1:8083:8083"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/health" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  manager-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${MANAGER_DB_PASSWORD:?Set MANAGER_DB_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../Manager-service/migrations
+        target: /migrations
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - -path=/migrations
+      - -database=postgres://manager_service@postgres:5432/manager_db?sslmode=disable
+      - up
+
+  manager-service:
+    build:
+      context: ../Manager-service
+    image: erp/manager-service:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      manager-migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8084"
+      APP_ENV: ${MANAGER_APP_ENV:-development}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: manager_service
+      DB_NAME: manager_db
+      DB_PASSWORD: ${MANAGER_DB_PASSWORD:?Set MANAGER_DB_PASSWORD}
+      DB_SSLMODE: disable
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
+      SHUTDOWN_TIMEOUT: 5s
+    ports:
+      - "127.0.0.1:8084:8084"
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/readyz" > /dev/null || exit 1'
       interval: 10s
       timeout: 3s
       retries: 5

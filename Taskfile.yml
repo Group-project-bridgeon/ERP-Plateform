@@ -1,0 +1,33 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Display available tasks and usage instructions
+    silent: true
+    cmds:
+      - task --list
+
+  validate:
+    desc: Validate Compose configuration, TLS overlay, and environment files without starting containers
+    cmds:
+      - pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/validate.ps1
+
+  start:
+    desc: Start all available ERP services and Kong gateway in verified order
+    cmds:
+      - pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-all.ps1
+
+  stop:
+    desc: Gracefully stop all ERP microservice containers without deleting volumes
+    cmds:
+      - pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/stop-all.ps1
+
+  status:
+    desc: Display status and health of ERP platform containers
+    cmds:
+      - docker ps --filter "name=erp-"
+
+  logs:
+    desc: Follow logs for running ERP platform services
+    cmds:
+      - docker compose -f docker-compose.yml -f docker-compose.opening-local.yml logs -f

@@ -27,3 +27,31 @@ services:
         paths:
           - /api/v1/auth
         strip_path: false
+
+  - name: purchasing-service
+    url: http://purchasing-service:8080/api/v1/
+    routes:
+      - name: purchasing-api-exact
+        paths:
+          - "~/^/api/v1/purchasing$"
+        strip_path: true
+        path_handling: v0
+      - name: purchasing-api-descendants
+        paths:
+          - /api/v1/purchasing/
+        strip_path: true
+        path_handling: v0
+
+  - name: manager-service
+    url: http://manager-service:8084/api/v1/
+    routes:
+      - name: manager-api-exact
+        paths:
+          - "~/^/api/v1/manager$"
+        strip_path: true
+        path_handling: v0
+      - name: manager-api-descendants
+        paths:
+          - /api/v1/manager/
+        strip_path: true
+        path_handling: v0

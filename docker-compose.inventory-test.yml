@@ -3,6 +3,7 @@ services:
   postgres:
     environment:
       INVENTORY_FIXTURE_PASSWORD: ${INVENTORY_FIXTURE_PASSWORD:?Run the test script}
+      INVENTORY_GATEWAY_RUN_ID: ${STOCK_GATEWAY_RUN_ID:?Run the test script}
     volumes:
       - type: bind
         source: ./scripts/inventory-test-init.sh
@@ -32,6 +33,7 @@ services:
       PGPASSWORD: ${INVENTORY_FIXTURE_PASSWORD:?Run the test script}
       JWT_ISSUER: erp-auth
       JWT_AUDIENCE: erp-api
+      STOCK_REFERENCE_ENABLED: "false"
     volumes:
       - type: bind
         source: ${SECURITY_TEST_KEY_DIR:?Run the test script}/public.pem
@@ -43,3 +45,8 @@ services:
     depends_on:
       inventory-service:
         condition: service_healthy
+  catalog-service:
+    environment:
+      CATALOG_STOCK_REFERENCES_ENABLED: "false"
+      TLS_CERT_PATH: ""
+      TLS_KEY_PATH: ""

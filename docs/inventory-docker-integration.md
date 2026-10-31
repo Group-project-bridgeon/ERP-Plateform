@@ -2,6 +2,13 @@
 
 ## Scope and dependencies
 
+Current fixture checkpoint (2026-10-25): the existing warehouse gateway regression
+is followed by Inventory's TestStockReadGateway. Required isolated schema versions
+are Inventory 000003, Auth 000008 and Catalog 000003. Both exact GLOBAL stock-read
+permissions are verified with real Auth login tokens. Only disposable fixture/test
+files change; normal Compose and Kong route configuration are unchanged. The older
+warehouse delivery context below remains historical.
+
 Inventory warehouse management is available in development at 7238613. Auth's
 000006 warehouse permission migration is available at 3490657. Inventory migration
 000001 creates the warehouse schema. Fulfillment/Delivery is planned as a separate
@@ -106,7 +113,8 @@ Full-run assertions:
 - Effective Docker context exclusion, real image builds, nonzero runtime UIDs,
   readable mounted public key, binary-only app and no host Inventory binding.
 - Inventory internal health/readiness 200 and direct unauthenticated API 401.
-- Migrations Inventory 1:false, Auth 6:false, Catalog 2:false.
+- Migrations Inventory 3:false, Auth 8:false, Catalog 3:false; stock permission
+  definitions exist without automatic role/user assignments.
 - Actual Auth login and /me 200 through Kong; local signature and claim checks.
 - Anonymous/invalid/expired tokens 401; no permissions or WAREHOUSE-only 403.
 - Reader list/detail 200 and denied writes 403; editor create 201/update/status 200.
@@ -116,6 +124,44 @@ Full-run assertions:
   Inventory missing-warehouse 404.
 - SIGTERM shutdown exits 0. Only fixture containers/network/images/temp keys are
   removed, tmpfs data disappears and prior environment is restored.
+
+Stock-read verification then runs separately, preserving warehouse_test.go:
+
+- Six fresh identity profiles: no stock grants, balance only, movements only, both,
+  WAREHOUSE-only and warehouse-management only. Login and /me pass through Kong.
+- Exact routes are GET /api/v1/inventory/warehouses/:id/stock-balances with
+  inventory.stock-balances:read and GET on /stock-movements with
+  inventory.stock-movements:read. The existing Kong prefix route preserves the full
+  path and bearer header; no additional normal route definition is needed.
+- Synthetic setup uses the internal posting engine and explicit test-only actor,
+  producer and reference snapshots, with no mutation HTTP endpoint or disabled
+  integrity guard. Three added warehouses include an empty warehouse and an
+  inactive warehouse, with 105 balances, 107 movements and eight completed operations.
+- Multiple variants, repeated movements, a stored zero, a quantity above JavaScript's
+  safe-integer range and recorded pack/product snapshots exercise both read APIs.
+- Default 50/max 100, static keyset traversal, filter/warehouse cursor binding,
+  400/404/empty and inactive historical access, exact string quantities/versions
+  and unchanged SHA256 snapshots of all four stock tables are asserted.
+- The fixture Catalog service is explicitly stopped before these reads; optional
+  Catalog machine-reference transport and Inventory clients remain disabled.
+  Synthetic setup does not establish live Catalog integration.
+- PostgreSQL fixture markers bind both DB connections to the unique project, in
+  addition to explicit loopback host/database/user gates. Pre-existing Docker
+  container IDs, start times, running states and restart counts are checked before
+  and after the run. No normal container is stopped or rebuilt.
+
+The locally signed expired token is only a negative test. Successful authorization
+always uses actual Auth login. Gateway machine-token coverage is intentionally not
+enabled: fixture Auth uses isolated HTTP and machine issuance requires direct TLS.
+Existing Inventory security/router separation tests remain the evidence for that
+boundary. Test-only HTTP is confined to the private Compose network and ephemeral
+loopback gateway; production TLS/security settings are not weakened. Live keyset
+pages are not snapshot-stable under concurrent writes. See the Inventory
+[read API contract](../../Inventory-Service/docs/stock-read-api.md).
+
+Normal deployment still requires separately approved migrations, index-build timing,
+keys/trust, role assignments and fresh human login tokens. This harness performs
+none of that normal provisioning. Opening Stock and other mutations are excluded.
 
 Every successful authorized test uses an actual login token. A locally signed
 expired token is used solely for the negative expiry test. Passwords, tokens,
@@ -173,4 +219,12 @@ use normal docker compose down -v as an application rollback. Database recovery
 requires the agreed backup/restore procedure. No normal deployment is automated
 by this task's test script.
 
-See [executed results and limitations](inventory-docker-results.md) for the 2026-10-22 verification record.
+For Stock Read APIs, the normal rollout prerequisite versions are Inventory 000003
+and Auth 000008 (including earlier migrations). The warehouse-only Auth 000006
+proposal above is historical. Review stock-table/index migration timing, backups,
+public-key/issuer configuration, exact GLOBAL grants and fresh login tokens through
+the separately authorized deployment process. No normal migration or deployment is
+performed by the fixture. Catalog is not a runtime read dependency.
+
+See [executed results and limitations](inventory-docker-results.md) for the original
+2026-10-22 record and the 2026-10-25 Stock Read APIs checkpoint.

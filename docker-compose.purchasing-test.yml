@@ -1,0 +1,185 @@
+# Standalone owned fixture. Never combine with the normal Compose stack.
+x-owned: &owned
+  purchasing.gateway.fixture: ${PURCHASING_GATEWAY_RUN_ID:?Use the fixture script}
+x-public-key: &public-key
+  type: bind
+  source: ${PURCHASING_GATEWAY_DIR:?Use the fixture script}/jwt-public.pem
+  target: /run/secrets/auth-jwt-public.pem
+  read_only: true
+  bind: {create_host_path: false}
+x-migration: &migration
+  image: migrate/migrate:v4.18.3
+  labels: *owned
+  depends_on:
+    postgres: {condition: service_healthy}
+  environment:
+    PGPASSWORD: ${PURCHASING_DB_PASSWORD:?Use the fixture script}
+services:
+  postgres:
+    image: postgres:17-alpine
+    labels: *owned
+    environment:
+      POSTGRES_USER: purchasing_gateway_admin
+      POSTGRES_PASSWORD: ${PURCHASING_GATEWAY_ADMIN_PASSWORD:?Use the fixture script}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      FIXTURE_PASSWORD: ${PURCHASING_DB_PASSWORD:?Use the fixture script}
+      FIXTURE_RUN_ID: ${PURCHASING_GATEWAY_RUN_ID:?Use the fixture script}
+    tmpfs: [/var/lib/postgresql/data]
+    ports: ["127.0.0.1::5432"]
+    volumes:
+      - type: bind
+        source: ./scripts/purchasing-test-init.sh
+        target: /docker-entrypoint-initdb.d/01-purchasing.sh
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      test: [CMD-SHELL, 'PGPASSWORD="$$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U purchasing_gateway_admin -d purchasing_db -tAc "SELECT 1" >/dev/null']
+      interval: 2s
+      timeout: 3s
+      retries: 40
+  auth-migrate:
+    <<: *migration
+    volumes: ["../Authentication/db/migrations:/migrations:ro"]
+    command: [-path=/migrations, -lock-timeout=15, '-database=postgres://auth_fixture@postgres:5432/auth_purchasing_gateway?sslmode=disable&connect_timeout=5', up]
+  catalog-migrate:
+    <<: *migration
+    volumes: ["../Catalog-Service/db/migrations:/migrations:ro"]
+    command: [-path=/migrations, -lock-timeout=15, '-database=postgres://catalog_fixture@postgres:5432/catalog_purchasing_gateway?sslmode=disable&connect_timeout=5', up]
+  inventory-migrate:
+    <<: *migration
+    volumes: ["../Inventory-Service/db/migrations:/migrations:ro"]
+    command: [-path=/migrations, -lock-timeout=15, '-database=postgres://inventory_service@postgres:5432/inventory_db?sslmode=disable&connect_timeout=5', up]
+  purchasing-migrate:
+    extends: {file: docker-compose.yml, service: purchasing-migrate}
+    labels: *owned
+  auth-service:
+    image: erp/purchasing-gateway-auth:${PURCHASING_GATEWAY_RUN_ID}
+    build:
+      context: ../Authentication
+      labels: *owned
+    labels: *owned
+    depends_on: {auth-migrate: {condition: service_completed_successfully}}
+    environment:
+      DATABASE_URL: postgres://auth_fixture@postgres:5432/auth_purchasing_gateway?sslmode=disable
+      PGPASSWORD: ${PURCHASING_DB_PASSWORD}
+      JWT_PRIVATE_KEY_PATH: /run/fixture/jwt-private.pem
+      JWT_ISSUER: erp-auth
+      JWT_AUDIENCE: erp-api
+      JWT_EXPIRY: 15m
+      SMTP_HOST: mock
+      PORT: "8080"
+      APP_ENV: test
+      TLS_CERT_PATH: /run/tls/server.pem
+      TLS_KEY_PATH: /run/tls/server-key.pem
+    volumes:
+      - '${PURCHASING_GATEWAY_DIR}/jwt-private.pem:/run/fixture/jwt-private.pem:ro'
+      - '${PURCHASING_GATEWAY_DIR}/material/auth-service.pem:/run/tls/server.pem:ro'
+      - '${PURCHASING_GATEWAY_DIR}/material/auth-service-key.pem:/run/tls/server-key.pem:ro'
+      - '${PURCHASING_GATEWAY_DIR}/material/auth-trust-bundle.pem:/etc/ssl/certs/ca-certificates.crt:ro'
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- https://localhost:8080/ready >/dev/null']
+      interval: 2s
+      timeout: 3s
+      retries: 40
+  catalog-service:
+    image: erp/purchasing-gateway-catalog:${PURCHASING_GATEWAY_RUN_ID}
+    build:
+      context: ../Catalog-Service
+      labels: *owned
+    labels: *owned
+    depends_on: {catalog-migrate: {condition: service_completed_successfully}}
+    environment:
+      DATABASE_URL: postgres://catalog_fixture@postgres:5432/catalog_purchasing_gateway?sslmode=disable
+      PGPASSWORD: ${PURCHASING_DB_PASSWORD}
+      PORT: "8081"
+      GIN_MODE: release
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: erp-auth
+      JWT_AUDIENCE: erp-api
+      CATALOG_STOCK_REFERENCES_ENABLED: "false"
+      TLS_CERT_PATH: /run/tls/server.pem
+      TLS_KEY_PATH: /run/tls/server-key.pem
+    volumes:
+      - *public-key
+      - '${PURCHASING_GATEWAY_DIR}/material/catalog-service.pem:/run/tls/server.pem:ro'
+      - '${PURCHASING_GATEWAY_DIR}/material/catalog-service-key.pem:/run/tls/server-key.pem:ro'
+      - '${PURCHASING_GATEWAY_DIR}/material/catalog-trust-bundle.pem:/etc/ssl/certs/ca-certificates.crt:ro'
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- https://localhost:8081/ready >/dev/null']
+      interval: 2s
+      timeout: 3s
+      retries: 40
+  inventory-service:
+    image: erp/purchasing-gateway-inventory:${PURCHASING_GATEWAY_RUN_ID}
+    build:
+      context: ../Inventory-Service
+      labels: *owned
+    labels: *owned
+    depends_on: {inventory-migrate: {condition: service_completed_successfully}}
+    environment:
+      DATABASE_URL: postgres://inventory_service@postgres:5432/inventory_db?sslmode=disable
+      PGPASSWORD: ${PURCHASING_DB_PASSWORD}
+      PORT: "8082"
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: erp-auth
+      JWT_AUDIENCE: erp-api
+      STOCK_REFERENCE_ENABLED: "false"
+    volumes: [*public-key]
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1:8082/ready >/dev/null']
+      interval: 2s
+      timeout: 3s
+      retries: 40
+  purchasing-service:
+    extends: {file: docker-compose.yml, service: purchasing-service}
+    image: erp/purchasing-gateway-purchasing:${PURCHASING_GATEWAY_RUN_ID}
+    build:
+      labels: *owned
+    labels: *owned
+    restart: "no"
+    environment: {JWT_ISSUER: erp-auth, JWT_AUDIENCE: erp-api}
+    volumes: [*public-key]
+  kong:
+    image: kong:3.9.3
+    labels: *owned
+    depends_on:
+      auth-service: {condition: service_healthy}
+      catalog-service: {condition: service_healthy}
+      inventory-service: {condition: service_healthy}
+      purchasing-service: {condition: service_healthy}
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8443 ssl
+      KONG_ADMIN_LISTEN: "off"
+      KONG_SSL_CERT: /run/fixture/server.pem
+      KONG_SSL_CERT_KEY: /run/fixture/server-key.pem
+      KONG_PROXY_ACCESS_LOG: "off"
+    ports: ["127.0.0.1::8443"]
+    volumes:
+      - '${PURCHASING_GATEWAY_DIR}/material/kong.yml:/kong/declarative/kong.yml:ro'
+      - '${PURCHASING_GATEWAY_DIR}/material/auth-service.pem:/run/fixture/server.pem:ro'
+      - '${PURCHASING_GATEWAY_DIR}/material/auth-service-key.pem:/run/fixture/server-key.pem:ro'
+    healthcheck:
+      test: [CMD, kong, health]
+      interval: 2s
+      timeout: 5s
+      retries: 40
+  purchasing-migrate-failure:
+    <<: *migration
+    profiles: [migration-failure]
+    volumes: ['${PURCHASING_GATEWAY_DIR}/failure:/migrations:ro']
+    command: [-path=/migrations, '-database=postgres://purchasing_service@postgres:5432/purchasing_failure?sslmode=disable&connect_timeout=5', up]
+  purchasing-blocked:
+    profiles: [migration-failure]
+    image: erp/purchasing-gateway-purchasing:${PURCHASING_GATEWAY_RUN_ID}
+    labels: *owned
+    depends_on: {purchasing-migrate-failure: {condition: service_completed_successfully}}
+    environment:
+      DATABASE_URL: postgres://purchasing_service@postgres:5432/purchasing_failure?sslmode=disable
+      PGPASSWORD: ${PURCHASING_DB_PASSWORD}
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+    volumes: [*public-key]
+networks:
+  default:
+    labels: *owned

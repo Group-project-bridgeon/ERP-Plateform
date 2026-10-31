@@ -1,0 +1,15 @@
+# Disposable only: test-inventory-gateway.ps1 -Reservations.
+services:
+  inventory-service:
+    environment:
+      STOCK_RESERVATIONS_ENABLED: "true"
+  kong:
+    environment:
+      KONG_PROXY_LISTEN: "0.0.0.0:8000,0.0.0.0:8443 ssl"
+      KONG_SSL_CERT: /fixture-tls/server.pem
+      KONG_SSL_CERT_KEY: /fixture-tls/server-key.pem
+    ports:
+      - "127.0.0.1::8443"
+    volumes:
+      - ${SECURITY_TEST_KEY_DIR:?Run the fixture script}/server.pem:/fixture-tls/server.pem:ro
+      - ${SECURITY_TEST_KEY_DIR:?Run the fixture script}/server-key.pem:/fixture-tls/server-key.pem:ro

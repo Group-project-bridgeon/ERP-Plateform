@@ -1,0 +1,45 @@
+# Disposable overlay only, selected by test-inventory-gateway.ps1 -OpeningStock.
+services:
+  auth-service:
+    environment:
+      TLS_CERT_PATH: /fixture-tls/server.pem
+      TLS_KEY_PATH: /fixture-tls/server-key.pem
+    volumes:
+      - ${SECURITY_TEST_KEY_DIR}/server.pem:/fixture-tls/server.pem:ro
+      - ${SECURITY_TEST_KEY_DIR}/server-key.pem:/fixture-tls/server-key.pem:ro
+      - ${SECURITY_TEST_KEY_DIR}/server.pem:/etc/ssl/certs/ca-certificates.crt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- https://auth-service:8080/ready >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  catalog-service:
+    environment:
+      CATALOG_STOCK_REFERENCES_ENABLED: "true"
+      TLS_CERT_PATH: /fixture-tls/server.pem
+      TLS_KEY_PATH: /fixture-tls/server-key.pem
+    volumes:
+      - ${SECURITY_TEST_KEY_DIR}/server.pem:/fixture-tls/server.pem:ro
+      - ${SECURITY_TEST_KEY_DIR}/server-key.pem:/fixture-tls/server-key.pem:ro
+      - ${SECURITY_TEST_KEY_DIR}/server.pem:/etc/ssl/certs/ca-certificates.crt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- https://catalog-service:8081/ready >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  inventory-service:
+    environment:
+      OPENING_STOCK_ENABLED: "true"
+      STOCK_REFERENCE_ENABLED: "true"
+      STOCK_AUTH_TOKEN_URL: https://auth-service:8080/api/v1/auth/service-token
+      STOCK_CATALOG_BATCH_URL: https://catalog-service:8081/api/v1/catalog/stock-references/batch
+      STOCK_MACHINE_ID: ${OPENING_FIXTURE_MACHINE_ID}
+      STOCK_CREDENTIAL_SECRET_FILE: /fixture-tls/credential.json
+      STOCK_CA_FILE: /fixture-tls/server.pem
+      STOCK_AUTH_ISSUER: erp-auth
+    volumes:
+      - ${SECURITY_TEST_KEY_DIR}/server.pem:/fixture-tls/server.pem:ro
+      - ${SECURITY_TEST_KEY_DIR}/credential.json:/fixture-tls/credential.json:ro
+  kong:
+    volumes:
+      - ${SECURITY_TEST_KEY_DIR}/kong.yml:/kong/declarative/kong.yml:ro
