@@ -365,6 +365,7 @@ services:
       - no-new-privileges:true
 
   party-migrate:
+    profiles: ["party"]
     image: migrate/migrate:v4.18.3
     restart: "no"
     depends_on:
@@ -385,6 +386,7 @@ services:
       - up
 
   party-service:
+    profiles: ["party"]
     build:
       context: ../crm_party_servic
     image: erp/party-service:dev
