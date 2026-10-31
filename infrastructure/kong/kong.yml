@@ -41,3 +41,17 @@ services:
           - /api/v1/purchasing/
         strip_path: true
         path_handling: v0
+
+  - name: manager-service
+    url: http://manager-service:8084/api/v1/
+    routes:
+      - name: manager-api-exact
+        paths:
+          - "~/^/api/v1/manager$"
+        strip_path: true
+        path_handling: v0
+      - name: manager-api-descendants
+        paths:
+          - /api/v1/manager/
+        strip_path: true
+        path_handling: v0
