@@ -14,6 +14,7 @@ services:
       PARTY_DB_PASSWORD: ${PARTY_DB_PASSWORD}
       PURCHASING_DB_PASSWORD: ${PURCHASING_DB_PASSWORD}
       INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
+      MANAGER_DB_PASSWORD: ${MANAGER_DB_PASSWORD}
       SALES_DB_PASSWORD: ${SALES_DB_PASSWORD}
       RETURNS_DB_PASSWORD: ${RETURNS_DB_PASSWORD}
       FINANCE_DB_PASSWORD: ${FINANCE_DB_PASSWORD}
@@ -406,6 +407,70 @@ services:
       test:
         - CMD-SHELL
         - 'wget -qO- "http://127.0.0.1:$${PORT}/health" > /dev/null || exit 1'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  manager-migrate:
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${MANAGER_DB_PASSWORD:?Set MANAGER_DB_PASSWORD}
+    volumes:
+      - type: bind
+        source: ../Manager-service/migrations
+        target: /migrations
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - -path=/migrations
+      - -database=postgres://manager_service@postgres:5432/manager_db?sslmode=disable
+      - up
+
+  manager-service:
+    build:
+      context: ../Manager-service
+    image: erp/manager-service:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      manager-migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8084"
+      APP_ENV: ${MANAGER_APP_ENV:-development}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: manager_service
+      DB_NAME: manager_db
+      DB_PASSWORD: ${MANAGER_DB_PASSWORD:?Set MANAGER_DB_PASSWORD}
+      DB_SSLMODE: disable
+      JWT_PUBLIC_KEY_PATH: /run/secrets/auth-jwt-public.pem
+      JWT_ISSUER: ${AUTH_JWT_ISSUER:-erp-auth}
+      JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-erp-api}
+      SHUTDOWN_TIMEOUT: 5s
+    ports:
+      - "127.0.0.1:8084:8084"
+    volumes:
+      - type: bind
+        source: ../Authentication/keys/jwt-public.pem
+        target: /run/secrets/auth-jwt-public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- "http://127.0.0.1:$${PORT}/readyz" > /dev/null || exit 1'
       interval: 10s
       timeout: 3s
       retries: 5

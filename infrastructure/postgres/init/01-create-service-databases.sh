@@ -67,6 +67,7 @@ EOSQL
 create_service_database auth_service auth_db "$AUTH_DB_PASSWORD"
 create_service_database catalog_service catalog_db "$CATALOG_DB_PASSWORD"
 create_service_database party_service party_db "$PARTY_DB_PASSWORD"
+create_service_database manager_service manager_db "$MANAGER_DB_PASSWORD"
 create_service_database purchasing_service purchasing_db "$PURCHASING_DB_PASSWORD"
 create_service_database inventory_service inventory_db "$INVENTORY_DB_PASSWORD"
 create_service_database sales_service sales_db "$SALES_DB_PASSWORD"
